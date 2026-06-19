@@ -1,204 +1,159 @@
-# Claude Code 自定义视觉 Skill 制作教程
+# 从零开始：Claude Code 自定义视觉 Skill 制作教程
 
-> **目标**：为 Claude Code 打造一套"眼睛"——让没有多模态能力的模型也能看懂图片、截图、图表。
->
-> **成果**：双引擎视觉系统 —— Google Gemini（主力）+ 通义千问 Qwen-VL（备胎），自动切换，稳定可靠。
->
-> **适用读者**：有基础 Shell 编程经验，想扩展 Claude Code 能力的开发者。
+> 用两个 Shell 脚本，给你的 Claude Code 装上眼睛。
 
 ---
 
-## 目录
+## 学完你能得到什么？
 
-1. [问题背景：DeepSeek 模型"看不见"](#1-问题背景deepseek-模型看不见)
-2. [方案设计：双引擎 + 自动切换](#2-方案设计双引擎--自动切换)
-3. [Skill 机制解析：SKILL.md + Shell 脚本](#3-skill-机制解析skillmd--shell-脚本)
-4. [Skill 一：Gemini Vision（主力引擎）](#4-skill-一gemini-vision主力引擎)
-5. [Skill 二：Qwen-VL Backup（备用引擎）](#5-skill-二qwen-vl-backup备用引擎)
-6. [关键技术细节](#6-关键技术细节)
-7. [部署与配置](#7-部署与配置)
-8. [使用演示](#8-使用演示)
-9. [踩坑记录与最佳实践](#9-踩坑记录与最佳实践)
-10. [扩展思路](#10-扩展思路)
+- 理解 Claude Code 的 Skill 机制怎么工作
+- 拥有一个**双引擎**视觉系统：主力免费（Gemini）+ 备用直连（Qwen-VL）
+- 学会几个 Shell 脚本的实用技巧
+- 掌握从零写自定义 Skill 的完整方法
+
+**需要的前置知识**：会用终端、写过 Hello World 级别的 Shell 脚本就够了。
 
 ---
 
-## 1. 问题背景：DeepSeek 模型"看不见"
+## 第一章 为什么要做这个？
 
-### 1.1 现状
+### 1. AI 看不见
 
-Claude Code 如果使用 **DeepSeek-V4** 系列模型作为后端，虽然文本能力强大，但**不具备原生的视觉/多模态能力**——无法直接"看到"图片内容。
+我用 DeepSeek-V4 模型跑 Claude Code。文本能力很强，但有一个硬伤——**没有视觉能力**，不能"看到"图片。
 
-当你拖入一张截图问"这个报错是什么意思？"，或者贴一张架构图说"帮我分析这个设计"，模型只能看到文件路径，读不懂图像。
+我拖一张报错截图进去，说"帮我看看这个报错"，它只能看到文件路径，读不懂图片内容。截图里的报错信息、UI 界面、表格数据——对它来说全是空白。
 
-### 1.2 需求分析
+### 2. 解决思路
 
-需要构建一个外部视觉能力补丁，满足以下条件：
-
-| 需求 | 说明 |
-|------|------|
-| 🔌 无缝集成 | 在 Claude Code 对话中直接调用，无需切换工具 |
-| 🖼️ 多格式支持 | 支持 PNG、JPG、GIF、WebP、BMP、SVG 等常见格式 |
-| 🌐 网络可达 | 国内环境能正常访问 API（需考虑代理） |
-| 💰 成本可控 | 优先使用免费 API，备选付费方案 |
-| 🔄 高可用 | 主 API 挂了或配额耗尽时能自动切换备用方案 |
-| 📝 易维护 | 纯 Shell 实现，零依赖，修改方便 |
-
-### 1.3 候选 API 对比
-
-| API | 免费额度 | 国内直连 | 视觉能力 | 决策 |
-|-----|---------|---------|---------|------|
-| Google Gemini | 250 req/天 | ❌ 需代理 | ⭐⭐⭐⭐⭐ | 🥇 主力 |
-| Qwen-VL (DashScope) | 付费 | ✅ 直连 | ⭐⭐⭐⭐ | 🥈 备用 |
-| OpenAI GPT-4V | 无 | ❌ 需代理 | ⭐⭐⭐⭐⭐ | ❌ 太贵 |
-| Claude Vision | 无 | ❌ 需代理 | ⭐⭐⭐⭐⭐ | ❌ 已有 |
-
-**最终方案**：Gemini 2.5 Flash 作为主力（免费 + 质量高），Qwen-VL-Max 作为自动降级备用（国内直连 + 稳定）。
-
----
-
-## 2. 方案设计：双引擎 + 自动切换
-
-### 2.1 整体架构
+既然模型本身看不到，就给它接一个外部视觉 API：
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                    Claude Code                        │
-│                                                       │
-│  用户: "帮我看看这张截图里的报错"  ──┐                │
-│                                     │                 │
-│                              ┌──────▼────────┐       │
-│                              │  Vision Skill  │       │
-│                              │  (SKILL.md)    │       │
-│                              └──────┬────────┘       │
-│                                     │                 │
-│                          ┌──────────▼──────────┐     │
-│                          │  vision.sh           │     │
-│                          │  (Gemini API)        │     │
-│                          └──────────┬──────────┘     │
-│                                     │                 │
-│                           ┌──── HTTP 200? ────┐      │
-│                           │ ✅ 是             │ ❌ 否 │
-│                           ▼                    ▼      │
-│                    返回分析结果    ┌─────────────────┐│
-│                                   │vision-backup.sh ││
-│                                   │(Qwen-VL API)    ││
-│                                   └────────┬────────┘│
-│                                            │          │
-│                                    返回分析结果      │
-└─────────────────────────────────────────────────────┘
+用户发一张图片
+    → Claude Code 发现"这是图片分析任务"
+    → 自动调用脚本，把图片发给视觉 API
+    → API 返回图片里的文字描述
+    → Claude Code 读描述，回答用户
 ```
 
-### 2.2 为什么是双引擎？
+用户感觉模型突然"能看见"了，背后发生了什么完全透明。
 
-- **Gemini** 免费额度 250 次/天，个人使用足够，图片理解能力顶级
-- **Qwen-VL** 作为兜底：当 Gemini 配额用完（HTTP 429）或 Google 服务不可达时自动顶上
-- Claude 能从两种 API 的不同 JSON 结构中自动提取文字内容
+### 3. 为什么选 Gemini + Qwen-VL？
 
-### 2.3 Skill 文件结构
+市面上多模态 API 不少，我做了一个对比：
+
+| API | 免费额度 | 国内直连 | 图片理解 |
+|-----|---------|---------|---------|
+| Google Gemini | **250次/天** | 需要代理 | 顶级 |
+| Qwen-VL（通义千问） | 付费 | **能直连** | 优秀 |
+| OpenAI GPT-4V | 无免费 | 需要代理 | 顶级 |
+
+我的逻辑很简单：
+
+- **主力用 Gemini** ——免费，质量高，每天 250 次足够
+- **备用用 Qwen-VL** ——国内直连，Gemini 挂掉自动顶上
+
+这就是"双引擎 + 自动切换"策略。
+
+---
+
+## 第二章 先理解 Skill 怎么工作
+
+动手写代码之前，花 5 分钟搞懂 Skill 机制，事半功倍。
+
+### 1. 一个 Skill 就两个文件
 
 ```
 .claude/skills/
-├── vision/                    # 主力：Gemini 视觉
-│   ├── SKILL.md               # 技能定义 + 使用说明
-│   └── vision.sh              # 核心执行脚本
-└── vision-backup/             # 备用：Qwen-VL 视觉
-    ├── SKILL.md               # 技能定义（标注为 fallback）
-    └── vision-backup.sh       # 核心执行脚本
+└── vision/
+    ├── SKILL.md       ← "说明书"：告诉 Claude 什么时候触发
+    └── vision.sh      ← "发动机"：真正干活的脚本
 ```
 
----
+### 2. SKILL.md —— 决定触发时机
 
-## 3. Skill 机制解析：SKILL.md + Shell 脚本
-
-Claude Code 的 Skill 系统由两个文件组成，理解这套机制是创建任何自定义 Skill 的基础。
-
-### 3.1 SKILL.md —— 技能的"说明书"
+SKILL.md 带一个 YAML 头，三个字段：
 
 ```yaml
 ---
-name: vision                    # 技能名称（唯一标识）
-description: ...                # 一句话描述（决定何时触发）
-allowed-tools: Bash(bash:vision.sh) Bash(cat:*) Bash(base64:*)
+name: vision                    # 技能唯一ID
+description: ...                # 最重要！决定何时触发
+allowed-tools: Bash(...)        # 安全白名单
 ---
 ```
 
-**三个关键字段**：
-
-| 字段 | 作用 |
-|------|------|
-| `name` | 技能的唯一 ID，Claude 通过它识别和调用 Skill |
-| `description` | 最重要的字段。Claude 根据这个描述判断何时自动触发 Skill。要写清楚触发场景 |
-| `allowed-tools` | 白名单：这个 Skill 允许执行哪些 Bash 命令。安全机制，防止脚本越权 |
-
-**description 的写法很关键**，它决定了 Skill 的触发准确率：
+**`description` 最关键**——Claude 靠这句话判断"现在该不该用这个 Skill"。
 
 ```yaml
-# ✅ 好的 description（触发准确）
-description: Analyze images using Google Gemini vision model when
-  the current model lacks multimodal capabilities. Invoke with an
-  image path to get AI-powered image descriptions, text extraction,
-  or visual analysis.
+# ✅ 好的 description —— 覆盖各种触发场景
+description: Analyze images using Google Gemini vision model
+  when the current model lacks multimodal capabilities.
 
-# ❌ 差的 description（可能误触发或不触发）
+# ❌ 差的 description —— Claude 不知道该什么时候用
 description: A tool for images.
 ```
 
-### 3.2 vision.sh —— 技能的"发动机"
+**`allowed-tools` 是安全白名单**——不在这里的命令，脚本写了也执行不了。
 
-Shell 脚本负责实际的 API 调用。选择 Shell 而非 Python 的原因：
+### 3. 为什么用 Shell 而不是 Python？
 
-- **零依赖**：Windows 上有 Git Bash / WSL，macOS/Linux 自带 bash
-- **轻量**：不需要 virtual environment 或 pip install
-- **可分享**：别人拿到就能用，不用先折腾环境
+**零依赖**。Windows 装 Git Bash 就能跑，macOS/Linux 自带 bash。分享给别人不用先配环境。
 
 ---
 
-## 4. Skill 一：Gemini Vision（主力引擎）
+## 第三章 写 Gemini 视觉引擎（主力）
 
-### 4.1 API 选型
+打开终端，开始写。
 
-选择 **Gemini generateContent API** (`v1beta`)，原因：
-- v1beta 支持最新模型（如 gemini-2.5-flash）
-- 免费层级：250 req/天，个人使用够用
-- 图片输入方式：inline_data（base64），不需要先上传到存储桶
+### 第一步：创建文件
 
-### 4.2 获取 API Key
+```bash
+mkdir -p ~/.claude/skills/vision
+touch ~/.claude/skills/vision/vision.sh
+chmod +x ~/.claude/skills/vision/vision.sh
+```
 
-1. 访问 [Google AI Studio](https://aistudio.google.com/apikey)
-2. 用 Google 账号登录
-3. 点击 "Create API Key"
-4. 复制 key 备用
+### 第二步：获取 API Key
 
-### 4.3 脚本头部：变量定义与参数解析
+打开 [Google AI Studio](https://aistudio.google.com/apikey) → 登录 Google → Create API Key → 复制。
+
+**免费**，每天 250 次。
+
+### 第三步：写脚本头部
 
 ```bash
 #!/bin/bash
 set -euo pipefail
 
-API_KEY="${GEMINI_API_KEY:-你的默认Key}"
+API_KEY="${GEMINI_API_KEY:-你的Key}"
 PROXY="${HTTPS_PROXY:-http://127.0.0.1:7897}"
 MODEL="${3:-gemini-2.5-flash}"
 ```
 
-`set -euo pipefail` 是 Shell 最佳实践：`-e` 任何命令失败立即退出，`-u` 引用未定义变量时报错，`-o pipefail` 管道中任一命令失败都算失败。
+解释：
+- `set -euo pipefail`：三个安全开关。出错立即停、未定义变量报错、管道失败算失败
+- `${变量:-默认值}`：用户设了环境变量就用用户的，没设用默认值。**开箱即用 + 可覆盖**
 
-`${VAR:-默认值}` 这个模式让用户可通过环境变量覆盖，没设置时用默认值，开箱即用。
+### 第四步：读取参数
 
 ```bash
-IMAGE_FILE="$1"
-PROMPT="${2:-Describe this image in detail, including all text visible in the image.}"
+if [ $# -lt 1 ]; then
+  echo '{"error": "Usage: vision.sh <image_path> [prompt] [model]"}'
+  exit 1
+fi
 
-# 防御性检查
+IMAGE_FILE="$1"
+PROMPT="${2:-Describe this image in detail, including all text visible.}"
+
+# 防御性检查：文件在不在？
 if [ ! -f "$IMAGE_FILE" ]; then
-  echo '{"error": "File not found"}'
+  echo "{\"error\": \"File not found: $IMAGE_FILE\"}"
   exit 1
 fi
 ```
 
-必选参数（图片路径）+ 可选参数（提示词、模型），每个都有合理默认值。先检查文件存在性，避免后续奇怪错误。
+第一个参数（图片路径）必须给。第二个（提示词）可选，有默认值。**先检查文件存在，别等到后面才发现**。
 
-### 4.4 MIME 类型检测
+### 第五步：识别图片格式
 
 ```bash
 ext="${IMAGE_FILE##*.}"
@@ -210,67 +165,84 @@ case "$ext_lower" in
   webp)     mime="image/webp" ;;
   bmp)      mime="image/bmp" ;;
   svg)      mime="image/svg+xml" ;;
-  *)        mime="image/png" ;;        # 未知格式默认按 PNG 处理
+  *)        mime="image/png" ;;   # 不认识就当 PNG
 esac
 ```
 
-Gemini API 需要知道图片的 MIME 类型，通过文件扩展名推断，覆盖了常见格式。不认识的统一按 PNG 处理。
+Gemini API 需要知道图片 MIME 类型（`image/png` 等）。通过扩展名推断，覆盖六种常见格式，不认识的默认 PNG。
 
-### 4.5 核心难点：大图片的 Base64 编码
+`${IMAGE_FILE##*.}` 是 Shell 字符串截取——删掉最后一个 `.` 之前的所有内容，只留扩展名。
 
-这是整个脚本中最容易踩坑的地方。
+### 第六步：图片转 Base64（核心中的核心）
 
-**问题**：当图片较大时（如 4K 截图），base64 字符串可能有几百万字符。直接拼在命令行参数里会触发 **"Argument list too long"** 错误。
+**这是整个脚本最关键的一步，踩坑最多的地方。**
 
-**解决方案**：分段写入临时文件，再用 `-d @file` 传给 curl。
+要把图片变成 Base64 字符串嵌到 JSON 里发给 API。但一张 4K 截图的 Base64 可能几百万字符——直接放命令行会触发 **"Argument list too long"** 错误。
+
+**解决**：写到临时文件，让 curl 从文件读。
 
 ```bash
-# Step 1: 将图片 base64 编码写入临时文件
-B64_FILE="${TMPDIR}/vision_b64_$$.txt"
+TMPDIR="${TMPDIR:-/tmp}"
+B64_FILE="${TMPDIR}/vision_b64_$$.txt"         # 放 Base64
+PAYLOAD_FILE="${TMPDIR}/vision_payload_$$.json" # 放完整 JSON
+
+# 编码 + 跨平台兼容
 base64 -w0 "$IMAGE_FILE" > "$B64_FILE" 2>/dev/null || {
   base64 "$IMAGE_FILE" | tr -d '\n' > "$B64_FILE"
 }
 ```
 
-`base64 -w0`（GNU 版，Linux）失败时回退到 `base64 | tr -d '\n'`（macOS/BSD 版），做兼容处理。`$$` 是当前进程 PID，用于生成唯一临时文件名，避免多实例冲突。
+这段做了**跨平台兼容**：
+- Linux（GNU base64）支持 `-w0` 不换行
+- macOS（BSD base64）不支持 `-w0`，每 76 字符换行
+- 先试 Linux 方式，失败换 macOS 方式（`base64 | tr -d '\n'` 删掉换行）
+
+**`$$` 是当前进程 PID**——用来生成唯一临时文件名，避免多实例互相覆盖。
+
+### 第七步：拼接 JSON（分段写入）
+
+Gemini API 要求的格式：
+
+```json
+{"contents":[{"parts":[{"text":"提示词"},{"inline_data":{"mime_type":"image/png","data":"base64数据..."}}]}]}
+```
+
+重点：Base64 数据嵌套在 JSON 的 `data` 字段里。不能直接把数据放命令行。所以**分段写入文件**：
 
 ```bash
-# Step 2: 分段拼接 JSON payload
-PAYLOAD_FILE="${TMPDIR}/vision_payload_$$.json"
-
-# 写入 JSON 头部
+# 第1段：JSON 开头
 cat > "$PAYLOAD_FILE" << 'JSONHEAD'
 {"contents":[{"parts":[{"text":"
 JSONHEAD
 
-# 追加 prompt（转义特殊字符）
+# 第2段：转义后的提示词
 printf '%s' "$PROMPT" | sed 's/\\/\\\\/g; s/"/\\"/g' >> "$PAYLOAD_FILE"
 
-# 追加中间部分
+# 第3段：mime_type
 cat >> "$PAYLOAD_FILE" << 'JSONMID'
 "},{"inline_data":{"mime_type":"
 JSONMID
 printf '%s' "$mime" >> "$PAYLOAD_FILE"
 
+# 第4段：data 字段开始
 cat >> "$PAYLOAD_FILE" << 'JSONMID2'
 ","data":"
 JSONMID2
 
-# 追加 base64 数据（这部分可能很大）
+# 第5段：大块的 Base64 数据（从文件读，不经过命令行）
 cat "$B64_FILE" >> "$PAYLOAD_FILE"
 
-# 追加 JSON 尾部
+# 第6段：JSON 结尾
 cat >> "$PAYLOAD_FILE" << 'JSONFOOT'
 "}}]}]}
 JSONFOOT
 ```
 
-**设计要点**：
-- 使用 heredoc 分段写入，每段都很小，不会触发命令行长度限制
-- prompt 中的特殊字符（`\`、`"`）需要 JSON 转义，否则 API 返回解析错误
-- 最终 payload 是一个完整的 Gemini API JSON 请求体
+**为什么分 6 段？** 每段都很小（几十字符），用 heredoc 直接写文件。只有 Base64 那一段大——但它用 `cat file >> payload`，也是文件到文件，完全不经过命令行。
 
-### 4.6 API 调用
+**第 2 段为什么用 sed？** 提示词里可能有 `"` 或 `\`，直接放 JSON 会破坏结构。sed 把它们转义成 `\"` 和 `\\`。
+
+### 第八步：调 API
 
 ```bash
 HTTP_CODE=$(curl -s --max-time 120 --connect-timeout 15 \
@@ -280,87 +252,82 @@ HTTP_CODE=$(curl -s --max-time 120 --connect-timeout 15 \
   -o "${TMPDIR}/vision_resp_$$.txt" \
   "https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${API_KEY}" \
   -d "@${PAYLOAD_FILE}")
-
->&2 echo "[vision] HTTP $HTTP_CODE"
-cat "${TMPDIR}/vision_resp_$$.txt"
-rm -f "$PAYLOAD_FILE" "$B64_FILE" "${TMPDIR}/vision_resp_$$.txt"
 ```
 
-**curl 参数说明**：
+curl 参数：
 
 | 参数 | 作用 |
 |------|------|
-| `-s` | 静默模式，不输出进度条 |
-| `--max-time 120` | 整体超时 120 秒，大图上传+推理可能较慢 |
-| `--connect-timeout 15` | 连接超时 15 秒，网络不通时快速失败 |
-| `-x "$PROXY"` | 通过代理访问（国内需翻墙访问 Google） |
-| `-w "%{http_code}"` | 捕获 HTTP 状态码，方便判断成功/降级 |
-| `-d @<file>` | 从文件读取请求体，避免命令行参数过长 |
+| `-s` | 不输出进度条（输出会被 Claude 读到） |
+| `--max-time 120` | 最多等 2 分钟（大图上传+推理慢） |
+| `--connect-timeout 15` | 15 秒连不上就放弃 |
+| `-x "$PROXY"` | 走代理（国内访问 Google 必须） |
+| `-w "%{http_code}"` | 把 HTTP 状态码存到变量 |
+| `-d @file` | **从文件读请求体**（不经过命令行） |
 
-所有日志输出到 stderr（`>&2`），最终结果输出到 stdout——Claude 读到的就是纯净的 JSON 响应。
+### 第九步：输出结果
 
-### 4.7 响应解析
+```bash
+# stderr → 给人看的日志
+>&2 echo "[vision] HTTP $HTTP_CODE"
 
-Gemini API 成功响应结构：
+# stdout → 给程序读的 JSON（Claude 只读这个）
+cat "${TMPDIR}/vision_resp_$$.txt"
 
-```json
-{
-  "candidates": [{
-    "content": {
-      "parts": [
-        {"text": "这张图片显示了一个登录界面，包含用户名和密码输入框..."}
-      ]
-    }
-  }]
-}
+# 清理
+rm -f "$PAYLOAD_FILE" "$B64_FILE" "${TMPDIR}/vision_resp_$$.txt"
 ```
 
-提取文本：`jq -r '.candidates[0].content.parts[0].text'`
+**关键设计**：日志和结果分开输出。
+- stderr（`>&2`）：`[vision] Encoding test.png...` → 给人看
+- stdout：API 返回的原始 JSON → Claude 读
 
-错误响应（如配额耗尽）：
+混在一起 Claude 就得从日志里翻 JSON，容易出错。分开就干净了。
 
-```json
-{
-  "error": {
-    "code": 429,
-    "message": "Resource has been exhausted..."
-  }
-}
+### 第十步：写 SKILL.md
+
+```yaml
+---
+name: vision
+description: Analyze images using Google Gemini vision model
+  when the current model lacks multimodal capabilities.
+allowed-tools: Bash(bash:vision.sh) Bash(cat:*) Bash(base64:*)
+---
 ```
 
 ---
 
-## 5. Skill 二：Qwen-VL Backup（备用引擎）
+## 第四章 写 Qwen-VL 备胎引擎
 
-### 5.1 与 Gemini Skill 的关键差异
+主力写完了。备用引擎结构几乎一样，我只讲差异。
 
-| 对比维度 | Gemini (vision) | Qwen-VL (vision-backup) |
-|---------|-----------------|------------------------|
-| API 格式 | Gemini 原生格式 | OpenAI 兼容格式 |
-| 认证方式 | URL 参数 `?key=xxx` | Header `Authorization: Bearer xxx` |
-| 图片传递 | inline_data + mime_type | data URL (`data:image/png;base64,...`) |
-| 代理需求 | 需要（国内访问 Google） | 通常不需要（阿里云国内） |
-| 触发时机 | 默认首选 | 仅当 Gemini 失败时 |
-| 响应解析 | `.candidates[0].content.parts[0].text` | `.choices[0].message.content` |
+### 为什么需要备胎？
 
-### 5.2 获取 API Key
+Gemini 两个可能的故障：
+1. 免费额度用完 → HTTP 429
+2. 代理挂了 → 网络不通
 
-1. 访问 [阿里云 DashScope](https://dashscope.console.aliyun.com/)
-2. 开通"模型服务" → 找到"通义千问VL"
-3. 获取 API Key
+这两个情况都不会报错给用户——备胎自动顶上。
 
-### 5.3 关键代码差异
+### 和 Gemini 的核心差异
 
-**Data URL 方式传递图片**（OpenAI 兼容格式的特点）：
+| | Gemini | Qwen-VL |
+|---|---|---|
+| API 格式 | Gemini 自己的 | 跟 ChatGPT 一模一样 |
+| 图片传递 | `inline_data` + mime_type | Data URL |
+| 认证 | URL 参数 `?key=xxx` | Header `Authorization: Bearer xxx` |
+| 代理 | **要** | **不要**（国内直连） |
+
+### 图片传递：Data URL
 
 ```bash
 B64=$(base64 -w0 "$IMAGE_FILE" 2>/dev/null || base64 "$IMAGE_FILE" | tr -d '\n')
 DATA_URL="data:$mime;base64,$B64"
 ```
 
-这是标准的 Data URL 格式——`data:image/png;base64,<数据>`，直接把图片嵌入在请求 JSON 中，不需要先上传到 OSS。
+前端同学应该很熟。格式就是 `data:image/png;base64,<数据>`，一个字符串，放 messages 里。
 
-**Payload 构建**（OpenAI 多模态格式）：
+### Payload 是 OpenAI 格式
 
 ```json
 {
@@ -369,15 +336,15 @@ DATA_URL="data:$mime;base64,$B64"
     "role": "user",
     "content": [
       {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
-      {"type": "text", "text": "请描述这张图片"}
+      {"type": "text", "text": "请描述"}
     ]
   }]
 }
 ```
 
-和 ChatGPT API 结构完全一致——一个 messages 数组，content 数组同时包含 image_url 和 text。
+和 ChatGPT API 一模一样。好处是**通用**——以后加 GPT-4V 几乎不用改 Payload。
 
-**代理是可选的**：
+### 代理是可选的
 
 ```bash
 CURL_OPTS="-s --max-time 120 --connect-timeout 15"
@@ -386,288 +353,133 @@ if [ -n "$PROXY" ]; then
 fi
 ```
 
-国内网络通常直连阿里云，只有特殊环境才需要代理。这一点和 Gemini 相反。
+不写死 `-x`，先检查有没有设代理。阿里云国内直连，默认不用走。
 
-### 5.4 响应解析
+### 自动降级怎么实现？
 
-Qwen-VL 返回 OpenAI 兼容格式：
-
-```json
-{
-  "choices": [{
-    "message": {
-      "content": "这张图片显示了一个登录界面..."
-    }
-  }]
-}
-```
-
-提取：`jq -r '.choices[0].message.content'`
-
-### 5.5 自动降级如何工作
-
-backup skill 不需要自己写调度逻辑。在 SKILL.md 中说明了触发条件——当 Gemini 返回 HTTP 429 或连接失败时，Claude 自己会判断"主引擎挂了，该切备胎"，自动调用 backup。整个降级过程对用户透明。
+**不需要写额外调度代码**。SKILL.md 里写了：当 Gemini 返回 HTTP 429 或连接失败，Claude 自己去调 backup。它能读 HTTP 状态码，看到 429 就知道切备胎。整个过程用户无感。
 
 ---
 
-## 6. 关键技术细节
+## 第五章 部署
 
-### 6.1 为什么用临时文件而不是管道？
-
-```bash
-# ❌ 不工作：base64 数据太大，命令行放不下
-base64 image.png | curl ... -d @-
-```
-
-有两层问题：
-1. 如果用 `-d "data:image/png;base64,$(base64 image.png)"`，命令行参数长度有限制
-2. Gemini 的 JSON 结构需要 base64 数据嵌套在 `inline_data.data` 字段里，不能直接传裸数据
-
-**正确的方案**：分段写入临时文件 → curl `-d @file` 读取。
-
-### 6.2 跨平台兼容：macOS 与 Linux
-
-macOS 使用 BSD 版 base64，不支持 `-w0`（wrap=0）参数：
-
-```bash
-# 先尝试 GNU 方式，失败则降级到 BSD 方式
-base64 -w0 "$IMAGE_FILE" 2>/dev/null || {
-  base64 "$IMAGE_FILE" | tr -d '\n'
-}
-```
-
-### 6.3 JSON 特殊字符转义
-
-prompt 中如果包含双引号或反斜杠，直接拼接到 JSON 中会破坏 JSON 结构，导致 API 返回解析错误：
-
-```bash
-printf '%s' "$PROMPT" | sed 's/\\/\\\\/g; s/"/\\"/g'
-```
-
-### 6.4 stderr 与 stdout 分离
-
-```bash
->&2 echo "[vision] Encoding $IMAGE_FILE ($mime)..."    # stderr → 给人看
->&2 echo "[vision] HTTP $HTTP_CODE"                     # stderr → 给人看
-cat "${TMPDIR}/vision_resp_$$.txt"                      # stdout → 给程序读
-```
-
-- stderr 的日志只给人类看，不影响 Claude 解析
-- stdout 是纯净的 JSON，方便用 jq 或 Python 解析
-
-### 6.5 超时策略
+### 1. 放文件
 
 ```
---max-time 120 --connect-timeout 15
-```
-
-- 连接超时 15 秒：代理挂了或网络不通，快速失败而非死等
-- 整体超时 120 秒：大图片的 base64 上传 + API 推理可能需要 30-60 秒
-
----
-
-## 7. 部署与配置
-
-### 7.1 文件放置
-
-将以下文件放到 `~/.claude/skills/`：
-
-```
-.claude/skills/
+~/.claude/skills/
 ├── vision/
 │   ├── SKILL.md
-│   └── vision.sh        # chmod +x
+│   └── vision.sh          # chmod +x
 └── vision-backup/
     ├── SKILL.md
-    └── vision-backup.sh  # chmod +x
+    └── vision-backup.sh    # chmod +x
 ```
 
-不需要安装任何依赖，Claude Code 启动时会自动发现新的 Skill。
+不需要安装任何依赖。Claude Code 启动自动发现。
 
-### 7.2 环境变量（可选）
+### 2. 配 Key
 
-在 `~/.claude/settings.json` 中配置：
+二选一：
 
-```json
-{
-  "env": {
-    "GEMINI_API_KEY": "你的Gemini-Key",
-    "DASHSCOPE_API_KEY": "你的DashScope-Key",
-    "HTTPS_PROXY": "http://127.0.0.1:7897"
-  }
-}
+**方式 A：环境变量**
+```bash
+export GEMINI_API_KEY="你的Key"
+export DASHSCOPE_API_KEY="你的Key"
 ```
 
-### 7.3 验证部署
+**方式 B：改脚本默认值**（分享给别人时推荐）
+打开 `vision.sh`，把 `YOUR_GEMINI_API_KEY` 换成真的 Key。
+
+### 3. 测试
 
 ```bash
-# 测试 Gemini
-bash ~/.claude/skills/vision/vision.sh "test.png" "What do you see?"
-
-# 测试 Qwen-VL
-bash ~/.claude/skills/vision-backup/vision-backup.sh "test.png" "描述这张图"
+bash ~/.claude/skills/vision/vision.sh "test.png" "这张图里有什么？"
 ```
 
-### 7.4 在对话中使用
+看到 `[vision] HTTP 200` 即成功。
 
-部署完成后，在 Claude Code 中像平常一样发送消息：
+### 4. 使用
 
-> "帮我看看 D:\screenshots\error.png 这个报错是什么意思"
+在 Claude Code 里直接说话：
 
-Claude 会自动识别、自动调用 Skill、自动解析结果——整个过程用户感觉不到 Skill 的存在，就像模型本身就会看图片。
+> "帮我看看 D:\截图\error.png"
+
+自动识别、自动调 Skill、自动返回结果。
 
 ---
 
-## 8. 使用演示
+## 第六章 四个关键技术点
 
-### 场景 1：分析报错截图
+### 1. 大文件：为什么用临时文件
 
-```
-用户：分析 D:\error.png 里的报错信息
+直接放命令行：`curl -d "{\"data\":\"$(base64 img.png)\"}"` → 报错 `Argument list too long`。
 
-Claude → 调用 vision.sh → Gemini 返回：
-"这是一个 Python ImportError，提示找不到 'torch' 模块..."
-```
+操作系统限制单个命令行参数长度（一般 128KB~2MB），4K 截图 Base64 约 500 万字符，远超限制。
 
-### 场景 2：提取图中文字
+**必须写到文件，curl `-d @file` 读。**
 
-```
-用户：把这张表格截图里的数据提取出来 D:\table.png
+### 2. 跨平台：GNU vs BSD
 
-Claude → 调用 vision.sh（带特定 prompt）→ 返回完整表格数据
-```
+macOS 和 Linux 的 `base64` 不一样。macOS 不支持 `-w0`。
 
-### 场景 3：Gemini 配额耗尽，自动切换
+解决：**先试一种，失败用另一种**。
 
-```
-用户：分析 D:\diagram.png
+### 3. JSON 转义
 
-Claude → vision.sh → HTTP 429 (RESOURCE_EXHAUSTED)
-       → 检测到配额耗尽
-       → 自动调用 vision-backup.sh → Qwen-VL 返回结果
-```
+用户输入 `"` 或 `\` 会破坏 JSON。必须先转义。
+
+### 4. 超时
+
+连接超时短（15s），整体超时长（120s）。分开设，快失败 + 给足时间。
 
 ---
 
-## 9. 踩坑记录与最佳实践
+## 第七章 四个我踩过的坑
 
-### 踩坑 #1：Argument list too long
+### 坑 1：Argument list too long
 
-- **现象**：大图片（>2MB）编码后 base64 字符串太大，curl 报 `Argument list too long`
-- **原因**：直接把 base64 数据放在命令行参数中
-- **解决**：使用临时文件 + `-d @file` 方式传参
+大图编码后 curl 报错。原因：Base64 放命令行参数里。解决：临时文件 + `-d @file`。
 
-### 踩坑 #2：macOS 与 Linux base64 不兼容
+### 坑 2：macOS 报 `illegal option -- w`
 
-- **现象**：macOS 上 `base64 -w0` 报错 `illegal option -- w`
-- **原因**：macOS 使用 BSD 版 base64，不支持 `-w0` 参数
-- **解决**：做兼容处理，先尝试 `-w0`，失败则 `base64 | tr -d '\n'`
+macOS 的 base64 不支持 `-w0`。原因：BSD 版和 GNU 版参数不一样。解决：兼容处理。
 
-```bash
-base64 -w0 "$IMAGE_FILE" 2>/dev/null || {
-  base64 "$IMAGE_FILE" | tr -d '\n'
-}
-```
+### 坑 3：JSON 解析错误
 
-### 踩坑 #3：JSON 特殊字符未转义
+API 返回 `Invalid JSON`。原因：prompt 里特殊字符没转义。解决：sed 转义后再拼 JSON。
 
-- **现象**：prompt 中包含双引号或反斜杠时，API 返回 JSON 解析错误
-- **原因**：直接拼接字符串到 JSON 中，没有转义
-- **解决**：用 sed 对 prompt 做 JSON 转义
+### 坑 4：连不上 Google
 
-```bash
-printf '%s' "$PROMPT" | sed 's/\\/\\\\/g; s/"/\\"/g'
-```
-
-### 踩坑 #4：国内无法访问 Google API
-
-- **现象**：curl 连接超时，报 `Failed to connect`
-- **原因**：Google 服务在国内被阻断
-- **解决**：通过 Clash Verge 代理（`-x http://127.0.0.1:7897`）
-
-### 最佳实践清单
-
-- ✅ 优先免费 API：Gemini 免费 tier 对个人开发完全够用
-- ✅ 双保险设计：主力 + 备用，总有能用的
-- ✅ Shell 而非 Python：零依赖，跨平台，易调试
-- ✅ stderr 打日志，stdout 出结果：干净的输出 = 可靠的解析
-- ✅ 合理的超时：连接 15s + 整体 120s，兼顾体验和大图
-- ✅ 防御性编程：检查文件存在、MIME 类型、HTTP 状态码
-- ✅ 临时文件用 PID：避免多实例冲突
+curl 超时。原因：国内 Google 被阻断。解决：走 Clash Verge 代理 `-x http://127.0.0.1:7897`。
 
 ---
 
-## 10. 扩展思路
+## 第八章 扩展方向
 
-### 10.1 添加更多视觉引擎
+**加第三个引擎**：照抄 backup.sh，改 endpoint 和认证。因为已经是 OpenAI 格式，加 GPT-4V 几乎不用动。
 
-按照同样的模式，可以轻松添加第三个、第四个视觉引擎：
+**分析视频**：ffmpeg 抽帧 → vision.sh。
 
-```
-.claude/skills/
-├── vision/           # Gemini
-├── vision-backup/    # Qwen-VL
-└── vision-openai/    # GPT-4V（需要时）
-    ├── SKILL.md
-    └── vision-openai.sh
-```
+**批量处理**：一个 for 循环。
 
-因为 backup skill 已经用了 OpenAI 兼容格式，加 GPT-4V 只需改 endpoint 和认证方式，Payload 结构不动。
-
-### 10.2 支持视频帧分析
-
-用 `ffmpeg` 提取视频关键帧，然后送给 vision skill：
-
-```bash
-ffmpeg -i video.mp4 -vf "fps=1" frames/frame_%04d.png
-bash vision.sh frames/frame_0001.png "描述这一帧的内容"
-```
-
-### 10.3 批量图片处理
-
-```bash
-for img in screenshots/*.png; do
-  echo "=== $img ==="
-  bash vision.sh "$img" "提取所有文字"
-done
-```
-
-### 10.4 场景化 Prompt 触发
-
-在 SKILL.md 中编写更精细的触发规则，让 Claude 在不同场景下使用不同的默认 prompt：
-
-- 看到截图 → "提取所有 UI 元素和文字"
-- 看到图表 → "分析数据趋势和关键数值"
-- 看到照片 → "详细描述场景内容"
+**场景化 Prompt**：截图自动问 UI，图表自动问数据，照片自动问场景。
 
 ---
 
 ## 附录
 
-### A. 完整文件清单
+### 文件清单
 
-| 文件 | 大小 | 用途 |
-|------|------|------|
-| `.claude/skills/vision/SKILL.md` | ~2KB | 技能定义（YAML + Markdown） |
-| `.claude/skills/vision/vision.sh` | ~3KB | Gemini API 调用脚本 |
-| `.claude/skills/vision-backup/SKILL.md` | ~2KB | 备用技能定义 |
-| `.claude/skills/vision-backup/vision-backup.sh` | ~3KB | Qwen-VL API 调用脚本 |
+| 文件 | 说明 |
+|------|------|
+| `skills/vision/SKILL.md` | Gemini 引擎说明书 |
+| `skills/vision/vision.sh` | Gemini API 脚本 |
+| `skills/vision-backup/SKILL.md` | Qwen-VL 引擎说明书 |
+| `skills/vision-backup/vision-backup.sh` | Qwen-VL API 脚本 |
 
-### B. API 端点速查
+### 参考资源
 
-| Skill | API Endpoint |
-|-------|-------------|
-| vision | `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}` |
-| vision-backup | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` |
-
-### C. 参考链接
-
-- [Google AI Studio](https://aistudio.google.com/) — 获取 Gemini API Key
-- [Gemini API 文档](https://ai.google.dev/gemini-api/docs/vision)
-- [阿里云 DashScope](https://dashscope.console.aliyun.com/) — 获取 Qwen-VL API Key
-- [通义千问 VL 文档](https://help.aliyun.com/zh/model-studio/tongyi-qianwen-vl)
-- [Claude Code Skills 文档](https://docs.anthropic.com/en/docs/claude-code/skills)
-
----
-
-> **写在最后**：这个双引擎视觉系统虽然只有 ~200 行 Shell 代码，但它解决了"AI 看不见"这个根本问题。Skill 机制的精妙之处在于——它让 Claude Code 具备了"调用外部工具"的能力，而这正是 AI Agent 的核心。希望这篇教程能帮到你，也期待看到基于这个模式做出更多有趣的扩展。
+- Google AI Studio：`aistudio.google.com/apikey`（免费 Key）
+- 阿里云 DashScope：`dashscope.console.aliyun.com`（Qwen-VL Key）
+- Gemini 视觉文档：`ai.google.dev/gemini-api/docs/vision`
+- Claude Code Skills 文档：`docs.anthropic.com/en/docs/claude-code/skills`

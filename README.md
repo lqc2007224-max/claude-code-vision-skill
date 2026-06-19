@@ -106,9 +106,12 @@ skills/
 - stderr 输出日志给人看，stdout 输出 JSON 给程序读
 - 跨平台兼容 GNU/BSD base64 差异
 
-## 📖 完整教程
+## 📖 文档
 
-详细的从零制作教程见 [TUTORIAL.md](./TUTORIAL.md)。
+| 文档 | 适合人群 |
+|------|---------|
+| [**QUICKSTART.md**](./QUICKSTART.md) | 🏃 只想跑通，不想学。复制粘贴，3 分钟搞定 |
+| [**TUTORIAL.md**](./TUTORIAL.md) | 📚 想彻底学会。从零讲起，每一步为什么这样做都说清楚 |
 
 ## ❓ FAQ
 
